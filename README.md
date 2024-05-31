@@ -8,16 +8,16 @@ pip install -e .
 
 ### Permissions
 CatBot expects to be in three groups:
-1) a **main group**, where it has the following user permissions:
-    * Send Messages
-    * Send Media:
-        * Sticker & GIFs
-        * Polls
-        * Embed Links
+1) a **main group** where CatBot has these **admin** permissions:
+    * Add Users
     * Pin Messages
-2) an **admin group**, where it has minimal admin rights (admin, but everything permission turned off that can be turned off)
-3) a **waiting room group** where it only has the following user permission:
+2) an **admin group** where CatBot has these **user** permissions:
     * Send Messages
+3) a **waiting room group** where CatBot has these **user** permissions:
+    * Send Messages
+
+Catbot expects [Privacy Mode](https://core.telegram.org/bots/features#privacy-mode) to be turned off.
+That way it can read messages you give it in the admin group and waiting room group without being admin.
 
 ### `config.toml`
 Catbot requires a single configuration file `config.toml` containing the following fields:
@@ -49,14 +49,13 @@ mypy main.py
     CatBot does not require the flexibility of being added to arbitrary groups.
     It knows about the three groups it will be in, and has different behaviour for each.
 4) **[Least Privilege](https://en.wikipedia.org/wiki/Principle_of_least_privilege)**
-    CatBot should have minimal privileges and therefore should remain in [Privacy Mode](https://core.telegram.org/bots/features#privacy-mode).
-    This means (among other things) that it has no access to messages in groups where it is not an admin.
     This limits the damage that any bug can do.
 
 ### Roadmap
 - [x] `/say` command for use in the admin group to have catbot put a message in the main group
-- [ ] `/link` command for use in the waiting room to generate link to the main group.
-- [ ] Welcome messages in the waiting room and main chat.
+- [x] Allow new users to join the main chat using the `/approve @username` command in the waiting room.
+- [x] Welcome message in the main chat
+- [ ] Welcome message in the waiting room
 - [ ] Meet announcements generated from ical
 - [ ] Ability to edit welcome messages.
 - [ ] The ability to edit messages sent by `/say`
