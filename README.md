@@ -55,7 +55,7 @@ mypy main.py
 - [x] `/say` command for use in the admin group to have catbot put a message in the main group
 - [x] Allow new users to join the main chat using the `/approve @username` command in the waiting room.
 - [x] Welcome message in the main chat
-- [ ] Welcome message in the waiting room
+- [x] Welcome message in the waiting room
 - [ ] Meet announcements generated from ical
 - [ ] Ability to edit welcome messages.
 - [ ] The ability to edit messages sent by `/say`

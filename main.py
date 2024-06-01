@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 import tomllib
 import datetime
+import httpx
+import arrow
+import ics
 from dataclasses import dataclass
-from telegram.constants import ChatMemberStatus
-from telegram import Update
+from telegram.constants import ChatMemberStatus, ParseMode
+from telegram import Update, Bot
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, CommandHandler, ChatJoinRequestHandler, ChatMemberHandler
 
 # Configuration ################################################################
@@ -26,7 +29,7 @@ CONFIG = Config("config.toml")
 
 # Utilities ####################################################################
 
-async def get_admins(bot,group_id=CONFIG.main_group_id):
+async def get_admins(bot:Bot):
     chat_members = await bot.get_chat_administrators(CONFIG.main_group_id)
     return {chat_member.user.id for chat_member in chat_members}
 
@@ -39,15 +42,57 @@ async def respond_success(update: Update, context: ContextTypes.DEFAULT_TYPE, me
 async def respond_error(update: Update, context: ContextTypes.DEFAULT_TYPE, message: str) -> None:
     await respond(update, context, f"❌ {message}")
 
+async def alert(bot:Bot, text:str) -> None:
+    await bot.send_message(chat_id=CONFIG.admin_group_id, text=text)
+
+def ordinal(n:int) -> str:
+    return f"{n}th" if n//10==1 else \
+           f"{n}st" if n %10==1 else \
+           f"{n}nd" if n %10==2 else \
+           f"{n}rd" if n %10==3 else \
+           f"{n}th"
+
 # Commands #####################################################################
 
-COMMANDS : list[str] = []
+COMMANDS : list = []
+
+async def cmd_meet_dates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/meet_dates: list upcomming meet dates"""
+    if not(update.message.chat.type=="private" or \
+           update.message.chat.id==CONFIG.main_group_id or\
+           update.message.chat.id==CONFIG.admin_group_id):
+        return
+    async with httpx.AsyncClient() as client:
+        response = await client.get("https://calendar.cambfurs.co.uk")
+        text = response.raise_for_status().text
+    events = list(ics.Calendar(text).events)
+    events.sort(key=lambda e:e.begin)
+    now = arrow.utcnow()
+    upcomming_events = filter(lambda e:now < e.end, events)
+    ret = ["⭐ __*Upcoming meet dates*__ ⭐"]
+    for event in upcomming_events:
+        local = event.begin.to('Europe/London')
+        month = arrow.locales.EnglishLocale.month_names[local.month]
+        day = ordinal(local.day)
+        ret.append(f"➡️ {month} {day} {event.description if event.description is not None else ''}")
+    await respond(update,context, "\n".join(ret), parse_mode=ParseMode.MARKDOWN_V2)
+COMMANDS.append(cmd_meet_dates)
+
 
 async def initialize(app: Application) -> None:
-    await app.bot.send_message(chat_id=CONFIG.admin_group_id, text="🟢 CatBot started")
+    # exceptions escaping from the initialize function result in a silent crash
+    # it's therefore important to wrap everything in a try/catch
+    try:
+        # place for any one-time initialization to be done
+        pass
+    except:
+        await alert(app.bot, "🆘 CatBot failed to start")
+        raise
+    else:
+        await alert(app.bot, "🟢 CatBot started")
 
 async def finalize(app: Application) -> None:
-    await app.bot.send_message(chat_id=CONFIG.admin_group_id, text="🆘 CatBot stopped")
+    await alert(app.bot, "🆘 CatBot stopped")
 
 async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.chat_member.chat.id != CONFIG.waiting_room_group_id:
@@ -55,9 +100,7 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
     old = update.chat_member.old_chat_member
     new = update.chat_member.new_chat_member
     if old.status==ChatMemberStatus.LEFT and new.status==ChatMemberStatus.MEMBER:
-        print("join event")
-        await context.bot.send_message(chat_id=CONFIG.admin_group_id, text=
-            f"🆕 {new.user.first_name} {new.user.last_name} (@{new.user.username})")
+        await alert(context.bot, f"🆕 {new.user.first_name} {new.user.last_name} (@{new.user.username})")
         await context.bot.send_message(chat_id=CONFIG.waiting_room_group_id, text=
             f"Hi {new.user.first_name}! An admin will be with you shortly to get you in the main chat.\n\nPlease read the rules at rules.cambfurs.co.uk and let us know and whether you agree.")
 
@@ -166,6 +209,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("say",   cmd_say))
     app.add_handler(CommandHandler("approve", cmd_approve))
+    app.add_handler(CommandHandler("meet_dates", cmd_meet_dates))
     app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(ChatJoinRequestHandler(join_request))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
