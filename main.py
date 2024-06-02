@@ -89,35 +89,31 @@ async def cmd_meet_dates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await respond(update,context, "\n".join(ret), parse_mode=ParseMode.MARKDOWN_V2)
 COMMANDS.append(cmd_meet_dates)
 
-def choose_meet_announcement(now: arrow.Arrow, next_events: list[ics.Event]) -> str:
-    if not next_events:
-        return ""
-    next_event = next_events[0]
+async def meet_started(bot, event) -> None:
+    await bot.send_message(chat_id=CONFIG.main_group_id, parse_mode=ParseMode.MARKDOWN_V2, text="\n".join([
+        "Meet has started!"
+    ]))
 
-    # round current time to nearest hour, this accounts for all kinds of imprecision
-    now = now.shift(minutes=30).floor('hours')
+async def meet_tomorrow(bot, event) -> None:
+    await bot.send_message(chat_id=CONFIG.main_group_id, parse_mode=ParseMode.MARKDOWN_V2, text="\n".join([
+        "Meet is tomorrow!"
+    ]))
 
-    if now==next_event.begin:
-        return "started"
-    elif now.hour == 10 and now.shift(days=1).date() == next_event.begin.date():
-        return "tomorrow"
-    elif now.hour == 10 and now.shift(days=7).date() == next_event.begin.date():
-        return "next_week"
-    else:
-        return ""
+async def meet_next_week(bot, event) -> None:
+    await bot.send_message(chat_id=CONFIG.main_group_id, parse_mode=ParseMode.MARKDOWN_V2, text="\n".join([
+        "Meet is next week!"
+    ]))
 
 async def hourly_callback(bot, now, next_events):
-    match choose_meet_announcement(now, next_events):
-        case "started":
-            await bot.send_message(chat_id=CONFIG.main_group_id, text="meet has started!")
-        case "tomorrow":
-            await bot.send_message(chat_id=CONFIG.main_group_id, text="meet is tomorrow!")
-        case "next_week":
-            await bot.send_message(chat_id=CONFIG.main_group_id, text="meet is next week!")
-        case "":
-            pass
+    for event in next_events:
+        if now.floor('hour')==event.begin.floor('hour'):
+            await meet_started(bot, event)
+        elif now.hour == 10 and now.shift(days=1).date() == event.begin.date():
+            await meet_tomorrow(bot, event)
+        elif now.hour == 10 and now.shift(days=7).date() == event.begin.date():
+            await meet_next_week(bot, event)
 
-async def periodic_callback_generator(bot: Bot):
+async def hourly_callback_generator(bot: Bot):
     while True:
         now = arrow.utcnow()
         await asyncio.sleep( (now.ceil('hours')-now).total_seconds() )
@@ -125,42 +121,11 @@ async def periodic_callback_generator(bot: Bot):
         next_events = await get_upcoming_meet_events(now=now)
         await hourly_callback(bot, now, next_events)
 
-def test_choose_meet_announcement():
-    event_begin = arrow.Arrow(2024, 10, 25, 12, 0, 0, tzinfo=LOCAL_TZ)
-    event = ics.Event(begin=event_begin, end=event_begin.shift(hours=8), description="test event")
-
-    now_meet_start    = event_begin.clone().shift(minutes=2)
-    if "started"!=choose_meet_announcement( now_meet_start, [event] ):
-        print("event started: failed")
-    if ""!=choose_meet_announcement( now_meet_start.shift(hours=-1), [event] ):
-        print("event started-1h: failed")
-    if ""!=choose_meet_announcement( now_meet_start.shift(hours=1), [event] ):
-        print("event started+1h: failed")
-
-    now_meet_tomorrow = event_begin.floor('day').shift(days=-1).shift(hours=10)
-    if "tomorrow"!=choose_meet_announcement( now_meet_tomorrow, [event] ):
-        print("event tomorrow: failed")
-    if ""!=choose_meet_announcement( now_meet_tomorrow.shift(hours=-1), [event] ):
-        print("event tomorrow-1h: failed")
-    if ""!=choose_meet_announcement( now_meet_tomorrow.shift(hours=1), [event] ):
-        print("event tomorrow+1h: failed")
-
-    now_meet_next_week = event_begin.floor('day').shift(days=-7).shift(hours=10)
-    if "next_week"!=choose_meet_announcement( now_meet_next_week, [event] ):
-        print("event next week: failed")
-    if ""!=choose_meet_announcement( now_meet_next_week.shift(hours=-1), [event] ):
-        print("event next week-1h: failed")
-    if ""!=choose_meet_announcement( now_meet_next_week.shift(hours=1), [event] ):
-        print("event next week+1h: failed")
-    
-    print("choose_meet_announcement tests success")
-
-
 async def initialize(app: Application) -> None:
     # exceptions escaping from the initialize function result in a silent crash
     # it's therefore important to wrap everything in a try block
     try:
-        app.create_task(periodic_callback_generator(app.bot))
+        app.create_task(hourly_callback_generator(app.bot))
     except:
         await alert(app.bot, "🆘 CatBot failed to start")
         raise
@@ -291,5 +256,4 @@ def main() -> None:
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    test_choose_meet_announcement()
     main()
