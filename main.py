@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
+from dataclasses import dataclass
 import tomllib
 import datetime
-import httpx
-import arrow
+import arrow # arrow is used by ICS instead of datetime
 import ics
-from dataclasses import dataclass
+import asyncio # used by telegram
+import httpx # used by telegram
 from telegram.constants import ChatMemberStatus, ParseMode
 from telegram import Update, Bot
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, CommandHandler, ChatJoinRequestHandler, ChatMemberHandler
@@ -26,10 +27,12 @@ class Config:
         self.waiting_room_group_id = cfg['waiting_room_group_id']
 
 CONFIG = Config("config.toml")
+ICAL_URL = 'https://calendar.cambfurs.co.uk'
+LOCAL_TZ = 'Europe/London'
 
 # Utilities ####################################################################
 
-async def get_admins(bot:Bot):
+async def get_admin_set(bot:Bot) -> set[int]:
     chat_members = await bot.get_chat_administrators(CONFIG.main_group_id)
     return {chat_member.user.id for chat_member in chat_members}
 
@@ -52,39 +55,112 @@ def ordinal(n:int) -> str:
            f"{n}rd" if n %10==3 else \
            f"{n}th"
 
-# Commands #####################################################################
-
-COMMANDS : list = []
-
-async def cmd_meet_dates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/meet_dates: list upcomming meet dates"""
-    if not(update.message.chat.type=="private" or \
-           update.message.chat.id==CONFIG.main_group_id or\
-           update.message.chat.id==CONFIG.admin_group_id):
-        return
+async def get_upcoming_meet_events(ical_url:str=ICAL_URL, local_tz:str=LOCAL_TZ, now=arrow.utcnow()) -> list[ics.Event]:
+    """returns sorted list of events that have not yet ended"""
     async with httpx.AsyncClient() as client:
-        response = await client.get("https://calendar.cambfurs.co.uk")
+        response = await client.get(ical_url)
         text = response.raise_for_status().text
     events = list(ics.Calendar(text).events)
     events.sort(key=lambda e:e.begin)
-    now = arrow.utcnow()
-    upcomming_events = filter(lambda e:now < e.end, events)
+    ret = []
+    for event in filter(lambda e:now < e.end, events):
+        event.begin = event.begin.to(local_tz)
+        event.end   = event.end.to(local_tz)
+        ret.append(event)
+    return ret
+
+# Commands #####################################################################
+
+COMMANDS = []
+
+async def cmd_meet_dates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/meet_dates: list upcoming meet dates"""
+    if not(update.message.chat.type=="private" or \
+           update.message.chat.id==CONFIG.main_group_id or \
+           update.message.chat.id==CONFIG.admin_group_id):
+        return
+    upcoming_events = await get_upcoming_meet_events()
     ret = ["⭐ __*Upcoming meet dates*__ ⭐"]
-    for event in upcomming_events:
-        local = event.begin.to('Europe/London')
-        month = arrow.locales.EnglishLocale.month_names[local.month]
-        day = ordinal(local.day)
-        ret.append(f"➡️ {month} {day} {event.description if event.description is not None else ''}")
+    for event in upcoming_events:
+        month = arrow.locales.EnglishLocale.month_names[event.begin.month]
+        day = ordinal(event.begin.day)
+        maybe_description = ' '+event.description if event.description is not None else ''
+        ret.append(f"➡️ {month} {day}{maybe_description}")
     await respond(update,context, "\n".join(ret), parse_mode=ParseMode.MARKDOWN_V2)
 COMMANDS.append(cmd_meet_dates)
+
+def choose_meet_announcement(now: arrow.Arrow, next_events: list[ics.Event]) -> str:
+    if not next_events:
+        return ""
+    next_event = next_events[0]
+
+    # round current time to nearest hour, this accounts for all kinds of imprecision
+    now = now.shift(minutes=30).floor('hours')
+
+    if now==next_event.begin:
+        return "started"
+    elif now.hour == 10 and now.shift(days=1).date() == next_event.begin.date():
+        return "tomorrow"
+    elif now.hour == 10 and now.shift(days=7).date() == next_event.begin.date():
+        return "next_week"
+    else:
+        return ""
+
+async def hourly_callback(bot, now, next_events):
+    match choose_meet_announcement(now, next_events):
+        case "started":
+            await bot.send_message(chat_id=CONFIG.main_group_id, text="meet has started!")
+        case "tomorrow":
+            await bot.send_message(chat_id=CONFIG.main_group_id, text="meet is tomorrow!")
+        case "next_week":
+            await bot.send_message(chat_id=CONFIG.main_group_id, text="meet is next week!")
+        case "":
+            pass
+
+async def periodic_callback_generator(bot: Bot):
+    while True:
+        now = arrow.utcnow()
+        await asyncio.sleep( (now.ceil('hours')-now).total_seconds() )
+        now = arrow.utcnow()
+        next_events = await get_upcoming_meet_events(now=now)
+        await hourly_callback(bot, now, next_events)
+
+def test_choose_meet_announcement():
+    event_begin = arrow.Arrow(2024, 10, 25, 12, 0, 0, tzinfo=LOCAL_TZ)
+    event = ics.Event(begin=event_begin, end=event_begin.shift(hours=8), description="test event")
+
+    now_meet_start    = event_begin.clone().shift(minutes=2)
+    if "started"!=choose_meet_announcement( now_meet_start, [event] ):
+        print("event started: failed")
+    if ""!=choose_meet_announcement( now_meet_start.shift(hours=-1), [event] ):
+        print("event started-1h: failed")
+    if ""!=choose_meet_announcement( now_meet_start.shift(hours=1), [event] ):
+        print("event started+1h: failed")
+
+    now_meet_tomorrow = event_begin.floor('day').shift(days=-1).shift(hours=10)
+    if "tomorrow"!=choose_meet_announcement( now_meet_tomorrow, [event] ):
+        print("event tomorrow: failed")
+    if ""!=choose_meet_announcement( now_meet_tomorrow.shift(hours=-1), [event] ):
+        print("event tomorrow-1h: failed")
+    if ""!=choose_meet_announcement( now_meet_tomorrow.shift(hours=1), [event] ):
+        print("event tomorrow+1h: failed")
+
+    now_meet_next_week = event_begin.floor('day').shift(days=-7).shift(hours=10)
+    if "next_week"!=choose_meet_announcement( now_meet_next_week, [event] ):
+        print("event next week: failed")
+    if ""!=choose_meet_announcement( now_meet_next_week.shift(hours=-1), [event] ):
+        print("event next week-1h: failed")
+    if ""!=choose_meet_announcement( now_meet_next_week.shift(hours=1), [event] ):
+        print("event next week+1h: failed")
+    
+    print("choose_meet_announcement tests success")
 
 
 async def initialize(app: Application) -> None:
     # exceptions escaping from the initialize function result in a silent crash
-    # it's therefore important to wrap everything in a try/catch
+    # it's therefore important to wrap everything in a try block
     try:
-        # place for any one-time initialization to be done
-        pass
+        app.create_task(periodic_callback_generator(app.bot))
     except:
         await alert(app.bot, "🆘 CatBot failed to start")
         raise
@@ -108,7 +184,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/start: initiate a CatBot conversation"""
     if update.message.chat.type!="private":
         return
-    admin_set = await get_admins(context.bot)
+    admin_set = await get_admin_set(context.bot)
     if update.message.from_user.id not in admin_set:
         await respond(update, context, "Meow!")
         return
@@ -123,7 +199,7 @@ async def cmd_say(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not( update.message.chat.type=="private" or update.message.chat.id==CONFIG.admin_group_id):
         return
 
-    admin_set = await get_admins(context.bot)
+    admin_set = await get_admin_set(context.bot)
     if update.message.from_user.id not in admin_set:
         await respond_error(update,context,"Only admins may use this command")
         return
@@ -215,4 +291,5 @@ def main() -> None:
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
+    test_choose_meet_announcement()
     main()
