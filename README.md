@@ -32,10 +32,9 @@ For security reasons, this file must never be checked in.
 ## Contributing
 
 ### Automated checkers
-We use two tools to help validate our python, `ruff` and `mypy`.
-```
+We use `ruff` to help validate the python.
+```bash
 ruff check main.py
-mypy main.py
 ```
 
 ### Design principles
@@ -51,11 +50,13 @@ mypy main.py
 4) **[Least Privilege](https://en.wikipedia.org/wiki/Principle_of_least_privilege)**
     This limits the damage that any bug can do.
 
-### Roadmap
+### Roadmap to Minimum Viable Catbot
 - [x] `/say` command for use in the admin group to have catbot put a message in the main group
 - [x] Allow new users to join the main chat using the `/approve @username` command in the waiting room.
 - [x] Welcome message in the main chat
 - [x] Welcome message in the waiting room
-- [ ] Meet announcements generated from ical
-- [ ] Ability to edit welcome messages.
+- [x] Meet announcements generated from ical
+
+#### Nice-to-haves
 - [ ] The ability to edit messages sent by `/say`
+- [ ] Ability to edit welcome messages?

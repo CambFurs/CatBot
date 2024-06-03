@@ -36,17 +36,29 @@ async def get_admin_set(bot:Bot) -> set[int]:
     chat_members = await bot.get_chat_administrators(CONFIG.main_group_id)
     return {chat_member.user.id for chat_member in chat_members}
 
+
 async def respond(update: Update, context: ContextTypes.DEFAULT_TYPE, message: str, **kwargs) -> None:
     await context.bot.send_message(chat_id=update.effective_chat.id, text=message, **kwargs)
+
 
 async def respond_success(update: Update, context: ContextTypes.DEFAULT_TYPE, message: str) -> None:
     await respond(update, context, f"✅ {message}")
 
+
 async def respond_error(update: Update, context: ContextTypes.DEFAULT_TYPE, message: str) -> None:
     await respond(update, context, f"❌ {message}")
 
-async def alert(bot:Bot, text:str) -> None:
+
+async def alert(bot:Bot, text: str) -> None:
     await bot.send_message(chat_id=CONFIG.admin_group_id, text=text)
+
+
+async def announce(bot:Bot, lines: list[str], **kwargs) -> None:
+    await bot.send_message(chat_id=CONFIG.main_group_id, 
+                           parse_mode=ParseMode.MARKDOWN_V2,
+                           text="\n".join(lines),
+                           **kwargs)
+
 
 def ordinal(n:int) -> str:
     return f"{n}th" if n//10==1 else \
@@ -54,6 +66,7 @@ def ordinal(n:int) -> str:
            f"{n}nd" if n %10==2 else \
            f"{n}rd" if n %10==3 else \
            f"{n}th"
+
 
 async def get_upcoming_meet_events(ical_url:str=ICAL_URL, local_tz:str=LOCAL_TZ, now=arrow.utcnow()) -> list[ics.Event]:
     """returns sorted list of events that have not yet ended"""
@@ -69,9 +82,88 @@ async def get_upcoming_meet_events(ical_url:str=ICAL_URL, local_tz:str=LOCAL_TZ,
         ret.append(event)
     return ret
 
+# Events #######################################################################
+
+async def waiting_room_welcome(bot, user) -> None:
+    await alert(bot, f"🆕 {user.first_name} {user.last_name} (@{user.username})")
+    await announce(bot, [
+        f"Hi {user.first_name}! An admin will be with you shortly to get you in the main chat.",
+         "",
+        "In the mean time, please read [the rules](https://rules.cambfurs.co.uk) and let us know and whether you agree."
+    ])
+
+
+async def main_group_welcome(bot, user) -> None:
+    await announce(bot, [
+        f"Everyone welcome {user.username} to the chat!",
+    ])
+
+
+async def meet_started(bot, event) -> None:
+    month_name = arrow.locales.EnglishLocale.month_names[event.begin.month]
+    await announce(bot, [ f"The {month_name} meet has started!" ])
+
+
+async def meet_tomorrow(bot, event) -> None:
+    month_name = arrow.locales.EnglishLocale.month_names[event.begin.month]
+    await announce(bot, [ f"Reminder! The {month_name} meet is tomorrow!" ])
+
+
+async def meet_next_week(bot, event) -> None:
+    month_name = arrow.locales.EnglishLocale.month_names[event.begin.month]
+    await announce(bot, [ f"Reminder! the {month_name} meet is next week!" ])
+
+
+async def hourly_callback(bot, now, next_events):
+    for event in next_events:
+        if now.floor('hour')==event.begin.floor('hour'):
+            await meet_started(bot, event)
+        elif now.hour == 10 and now.shift(days=1).date() == event.begin.date():
+            await meet_tomorrow(bot, event)
+        elif now.hour == 10 and now.shift(days=7).date() == event.begin.date():
+            await meet_next_week(bot, event)
+
+
+async def hourly_callback_generator(bot: Bot):
+    while True:
+        now = arrow.utcnow()
+        await asyncio.sleep( (now.ceil('hours')-now).total_seconds() )
+        now = arrow.utcnow()
+        next_events = await get_upcoming_meet_events(now=now)
+        await hourly_callback(bot, now, next_events)
+
+
+async def initialize(app: Application) -> None:
+    # exceptions escaping from the initialize function result in a silent crash
+    # it's therefore important to wrap everything in a try block
+    try:
+        app.create_task(hourly_callback_generator(app.bot))
+    except:
+        await alert(app.bot, "🆘 CatBot failed to start")
+        raise
+    else:
+        await alert(app.bot, "🟢 CatBot started")
+
+
+async def finalize(app: Application) -> None:
+    await alert(app.bot, "🆘 CatBot stopped")
+
 # Commands #####################################################################
 
 COMMANDS = []
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/start: initiate a CatBot conversation"""
+    if update.message.chat.type!="private":
+        return
+    admin_set = await get_admin_set(context.bot)
+    if update.message.from_user.id not in admin_set:
+        await respond(update, context, "Meow!")
+        return
+    command_docs = '\n'.join([cmd.__doc__ for cmd in COMMANDS])
+    await respond(update, context, f"Hewwo! I'm Catbot! These are the things I can do:\n{command_docs}", protect_content=True)
+COMMANDS.append(cmd_start)
+
 
 async def cmd_meet_dates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/meet_dates: list upcoming meet dates"""
@@ -89,51 +181,6 @@ async def cmd_meet_dates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await respond(update,context, "\n".join(ret), parse_mode=ParseMode.MARKDOWN_V2)
 COMMANDS.append(cmd_meet_dates)
 
-async def meet_started(bot, event) -> None:
-    await bot.send_message(chat_id=CONFIG.main_group_id, parse_mode=ParseMode.MARKDOWN_V2, text="\n".join([
-        "Meet has started!"
-    ]))
-
-async def meet_tomorrow(bot, event) -> None:
-    await bot.send_message(chat_id=CONFIG.main_group_id, parse_mode=ParseMode.MARKDOWN_V2, text="\n".join([
-        "Meet is tomorrow!"
-    ]))
-
-async def meet_next_week(bot, event) -> None:
-    await bot.send_message(chat_id=CONFIG.main_group_id, parse_mode=ParseMode.MARKDOWN_V2, text="\n".join([
-        "Meet is next week!"
-    ]))
-
-async def hourly_callback(bot, now, next_events):
-    for event in next_events:
-        if now.floor('hour')==event.begin.floor('hour'):
-            await meet_started(bot, event)
-        elif now.hour == 10 and now.shift(days=1).date() == event.begin.date():
-            await meet_tomorrow(bot, event)
-        elif now.hour == 10 and now.shift(days=7).date() == event.begin.date():
-            await meet_next_week(bot, event)
-
-async def hourly_callback_generator(bot: Bot):
-    while True:
-        now = arrow.utcnow()
-        await asyncio.sleep( (now.ceil('hours')-now).total_seconds() )
-        now = arrow.utcnow()
-        next_events = await get_upcoming_meet_events(now=now)
-        await hourly_callback(bot, now, next_events)
-
-async def initialize(app: Application) -> None:
-    # exceptions escaping from the initialize function result in a silent crash
-    # it's therefore important to wrap everything in a try block
-    try:
-        app.create_task(hourly_callback_generator(app.bot))
-    except:
-        await alert(app.bot, "🆘 CatBot failed to start")
-        raise
-    else:
-        await alert(app.bot, "🟢 CatBot started")
-
-async def finalize(app: Application) -> None:
-    await alert(app.bot, "🆘 CatBot stopped")
 
 async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.chat_member.chat.id != CONFIG.waiting_room_group_id:
@@ -141,36 +188,20 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
     old = update.chat_member.old_chat_member
     new = update.chat_member.new_chat_member
     if old.status==ChatMemberStatus.LEFT and new.status==ChatMemberStatus.MEMBER:
-        await alert(context.bot, f"🆕 {new.user.first_name} {new.user.last_name} (@{new.user.username})")
-        await context.bot.send_message(chat_id=CONFIG.waiting_room_group_id, text=
-            f"Hi {new.user.first_name}! An admin will be with you shortly to get you in the main chat.\n\nPlease read the rules at rules.cambfurs.co.uk and let us know and whether you agree.")
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start: initiate a CatBot conversation"""
-    if update.message.chat.type!="private":
-        return
-    admin_set = await get_admin_set(context.bot)
-    if update.message.from_user.id not in admin_set:
-        await respond(update, context, "Meow!")
-        return
-    command_docs = '\n'.join([cmd.__doc__ for cmd in COMMANDS])
-    await respond(update, context, f"Hewwo! I'm Catbot! These are the things I can do:\n{command_docs}", protect_content=True)
-COMMANDS.append(cmd_start)
+        await waiting_room_welcome(context.bot, new)
 
 
 async def cmd_say(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/say: puts replied message into the main chat"""
 
-    if not( update.message.chat.type=="private" or update.message.chat.id==CONFIG.admin_group_id):
+    if not update.message.chat.type=="private" or update.message.chat.id==CONFIG.admin_group_id:
         return
 
     admin_set = await get_admin_set(context.bot)
     if update.message.from_user.id not in admin_set:
-        await respond_error(update,context,"Only admins may use this command")
         return
 
     if update.message.reply_to_message is None:
-        print(update.message)
         await respond_error(update,context,"Please respond to the message you wish to send")
         return
 
@@ -179,16 +210,17 @@ async def cmd_say(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await respond_success(update,context,f"Sent! id: {message.id}")
 COMMANDS.append(cmd_say)
 
+# Authentication ###############################################################
+
 APPROVED_JOIN_REQUESTS = {}
 
 async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/approve @username: create invite link for user"""
 
-    if not( update.message.chat.id==CONFIG.waiting_room_group_id ):
+    if not update.message.chat.id==CONFIG.waiting_room_group_id:
         return
 
-    if update.message.from_user.username!="GroupAnonymousBot":
-        await respond_error(update,context,"Only admins may use this command")
+    if not update.message.from_user.username=="GroupAnonymousBot":
         return
 
     user = list(update.message.parse_entities(types=['mention']).values())
@@ -207,7 +239,6 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         CONFIG.main_group_id,
         creates_join_request=True,
         expire_date=datetime.datetime.now(datetime.UTC)+datetime.timedelta(minutes=minutes_valid))
-    print(invite_link)
     APPROVED_JOIN_REQUESTS[user] = invite_link.invite_link
 
     await respond(update, context, f"Here's your invite link to the CambFurs group! This link is only valid for {user} for {minutes_valid} minutes\n\n{invite_link.invite_link}")
@@ -217,27 +248,29 @@ COMMANDS.append(cmd_approve)
 async def join_request(update:Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.chat_join_request.from_user.id
     chat_id = update.chat_join_request.chat.id
-
-    if chat_id!=CONFIG.main_group_id:
-        print("Received join request for chat other than main group. Declined")
-        await context.bot.decline_chat_join_request(chat_id, user_id)
-        return
-
     username = f"@{update.chat_join_request.from_user.username}"
 
-    global APPROVED_JOIN_REQUESTS
-    if not( username in APPROVED_JOIN_REQUESTS and APPROVED_JOIN_REQUESTS[username] != update.chat_join_request.invite_link ):
-        print(f"{username} not in approved join requests. Declined")
+    if chat_id!=CONFIG.main_group_id:
+        await alert(context.bot, f"⛔ Declined join request from {username}: requested to join chat other than main group")
         await context.bot.decline_chat_join_request(chat_id, user_id)
         return
 
-    print(f"{username} successfully joined")
+    global APPROVED_JOIN_REQUESTS
+    if username not in APPROVED_JOIN_REQUESTS:
+        await alert(context.bot, f"⛔ Declined join request from {username}: they were not approved")
+        await context.bot.decline_chat_join_request(chat_id, user_id)
+        return
+
+    if APPROVED_JOIN_REQUESTS[username] != update.chat_join_request.invite_link:
+        await alert(context.bot, f"⛔ Declined join request from {username}: they used a link not intended for them")
+        await context.bot.decline_chat_join_request(chat_id, user_id)
+        return
+
     del APPROVED_JOIN_REQUESTS[username]
-    await context.bot.approve_chat_join_request(chat_id, user_id)
-    await context.bot.revoke_chat_invite_link(chat_id, update.chat_join_request.invite_link)
-    await context.bot.send_message(CONFIG.main_group_id, text=f"Everyone welcome {username} to the chat!")
+    await context.bot.approve_chat_join_request(CONFIG.main_group_id, user_id)
+    await context.bot.revoke_chat_invite_link(CONFIG.main_group_id, update.chat_join_request.invite_link)
     await context.bot.ban_chat_member(CONFIG.waiting_room_group_id, user_id)
-    print(update)
+    await main_group_welcome(context.bot, update.chat_join_request.from_user)
 
 # Main #########################################################################
 
