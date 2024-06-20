@@ -2,13 +2,32 @@
 from dataclasses import dataclass
 import tomllib
 import datetime
+
 import arrow # arrow is used by ICS instead of datetime
 import ics
+
 import asyncio # used by telegram
 import httpx # used by telegram
+
+# check out the telegram docs:
+# https://docs.python-telegram-bot.org/en/stable/telegram.bot.html
 from telegram.constants import ChatMemberStatus, ParseMode
 from telegram import Update, Bot
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, CommandHandler, ChatJoinRequestHandler, ChatMemberHandler
+
+def main() -> None:
+    app = ApplicationBuilder()\
+        .token(CONFIG.bot_token)\
+        .post_init(initialize)\
+        .post_stop(finalize)\
+        .build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("say",   cmd_say))
+    app.add_handler(CommandHandler("approve", cmd_approve))
+    app.add_handler(CommandHandler("meet_dates", cmd_meet_dates))
+    app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(ChatJoinRequestHandler(join_request))
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 # Configuration ################################################################
 
@@ -53,11 +72,22 @@ async def alert(bot:Bot, text: str) -> None:
     await bot.send_message(chat_id=CONFIG.admin_group_id, text=text)
 
 
-async def announce(bot:Bot, lines: list[str], **kwargs) -> None:
-    await bot.send_message(chat_id=CONFIG.main_group_id, 
-                           parse_mode=ParseMode.MARKDOWN_V2,
+async def announce(bot:Bot, lines: list[str], chat_id=CONFIG.main_group_id, **kwargs) -> None:
+    await bot.send_message(chat_id=chat_id, 
+                           parse_mode=ParseMode.HTML,
                            text="\n".join(lines),
                            **kwargs)
+
+
+def sanitize(text: str) -> str:
+    # See: https://core.telegram.org/bots/api#html-style
+    # NOTE: Order matters! "&" must be escaped first!
+    if text is None:
+        return ""
+    else:
+        return text.replace("&", "&amp")\
+                   .replace("<", "&lt")\
+                   .replace(">", "&gt")
 
 
 def ordinal(n:int) -> str:
@@ -85,17 +115,17 @@ async def get_upcoming_meet_events(ical_url:str=ICAL_URL, local_tz:str=LOCAL_TZ,
 # Events #######################################################################
 
 async def waiting_room_welcome(bot, user) -> None:
-    await alert(bot, f"🆕 {user.first_name} {user.last_name} (@{user.username})")
+    await alert(bot, f"🆕 {user.first_name} {user.last_name} (@{user.username} id:{user.id})")
     await announce(bot, [
-        f"Hi {user.first_name}! An admin will be with you shortly to get you in the main chat.",
+        f"Hi {sanitize(user.first_name)}! An admin will be with you shortly to get you in the main chat.",
          "",
-        "In the mean time, please read [the rules](https://rules.cambfurs.co.uk) and let us know and whether you agree."
-    ])
+        "In the mean time, please read <a href='https://rules.cambfurs.co.uk'>the rules</a> and let us know and whether you agree."
+    ], chat_id=CONFIG.waiting_room_group_id)
 
 
 async def main_group_welcome(bot, user) -> None:
     await announce(bot, [
-        f"Everyone welcome {user.username} to the chat!",
+        f"Everyone welcome {sanitize(user.username)} to the chat!",
     ])
 
 
@@ -114,6 +144,7 @@ async def meet_next_week(bot, event) -> None:
     await announce(bot, [ f"Reminder! the {month_name} meet is next week!" ])
 
 
+# This Callback gets called every hour at the top of the hour
 async def hourly_callback(bot, now, next_events):
     for event in next_events:
         if now.floor('hour')==event.begin.floor('hour'):
@@ -134,8 +165,8 @@ async def hourly_callback_generator(bot: Bot):
 
 
 async def initialize(app: Application) -> None:
-    # exceptions escaping from the initialize function result in a silent crash
-    # it's therefore important to wrap everything in a try block
+    # Exceptions escaping from the initialize function result in a silent crash.
+    # It's therefore important to wrap everything in a try block
     try:
         app.create_task(hourly_callback_generator(app.bot))
     except:
@@ -147,6 +178,24 @@ async def initialize(app: Application) -> None:
 
 async def finalize(app: Application) -> None:
     await alert(app.bot, "🆘 CatBot stopped")
+
+
+# Telegram is a little bit silly: we can't query the chat to see who is in it.
+# The solution is to listen for chat join (and leave) requests, and keep track
+# of this ourselves. This misses anyone that was in the waiting room before
+# catbot was live.
+SEEN_MEMBERS_IN_WAITING_ROOM = set()
+async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.chat_member.chat.id != CONFIG.waiting_room_group_id:
+        return
+    old = update.chat_member.old_chat_member
+    new = update.chat_member.new_chat_member
+    if old.status==ChatMemberStatus.LEFT and new.status==ChatMemberStatus.MEMBER:
+        SEEN_MEMBERS_IN_WAITING_ROOM.add(new.user.id)
+        await waiting_room_welcome(context.bot, new.user)
+    elif old.status==ChatMemberStatus.MEMBER and new.status==ChatMemberStatus.LEFT:
+        SEEN_MEMBERS_IN_WAITING_ROOM.discard(old.user.id)
+    print(SEEN_MEMBERS_IN_WAITING_ROOM)
 
 # Commands #####################################################################
 
@@ -172,23 +221,14 @@ async def cmd_meet_dates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
            update.message.chat.id==CONFIG.admin_group_id):
         return
     upcoming_events = await get_upcoming_meet_events()
-    ret = ["⭐ __*Upcoming meet dates*__ ⭐"]
+    ret = ["⭐ <b><u>Upcoming meet dates</u></b> ⭐"]
     for event in upcoming_events:
         month = arrow.locales.EnglishLocale.month_names[event.begin.month]
         day = ordinal(event.begin.day)
         maybe_description = ' '+event.description if event.description is not None else ''
-        ret.append(f"➡️ {month} {day}{maybe_description}")
-    await respond(update,context, "\n".join(ret), parse_mode=ParseMode.MARKDOWN_V2)
+        ret.append(f"➡️ {month} {day}{sanitize(maybe_description)}")
+    await respond(update,context, "\n".join(ret), parse_mode=ParseMode.HTML)
 COMMANDS.append(cmd_meet_dates)
-
-
-async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.chat_member.chat.id != CONFIG.waiting_room_group_id:
-        return
-    old = update.chat_member.old_chat_member
-    new = update.chat_member.new_chat_member
-    if old.status==ChatMemberStatus.LEFT and new.status==ChatMemberStatus.MEMBER:
-        await waiting_room_welcome(context.bot, new)
 
 
 async def cmd_say(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -211,8 +251,12 @@ async def cmd_say(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 COMMANDS.append(cmd_say)
 
 # Authentication ###############################################################
+# NOTE: Matching on usernames is not bullet-proof in Telegram. One user can own
+# multiple 'vanity' @usernames they can switch between or even have no username 
+# at all. I think it's fine to rely on usernames for the short duration between
+# /approving and them joining.
 
-APPROVED_JOIN_REQUESTS = {}
+APPROVED_USERS_IN_WAITING_ROOM = set()
 
 async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/approve @username: create invite link for user"""
@@ -229,19 +273,16 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     user = user[0]
 
-    global APPROVED_JOIN_REQUESTS
-    if user in APPROVED_JOIN_REQUESTS:
-        await context.bot.revoke_chat_invite_link(CONFIG.main_group_id, APPROVED_JOIN_REQUESTS[user])
-        del APPROVED_JOIN_REQUESTS[user]
-
     minutes_valid = 5
     invite_link = await context.bot.create_chat_invite_link(
         CONFIG.main_group_id,
         creates_join_request=True,
         expire_date=datetime.datetime.now(datetime.UTC)+datetime.timedelta(minutes=minutes_valid))
-    APPROVED_JOIN_REQUESTS[user] = invite_link.invite_link
 
-    await respond(update, context, f"Here's your invite link to the CambFurs group! This link is only valid for {user} for {minutes_valid} minutes\n\n{invite_link.invite_link}")
+    global APPROVED_USERS_IN_WAITING_ROOM
+    APPROVED_USERS_IN_WAITING_ROOM.add(user)
+
+    await respond(update, context, f"{user} Here's your invite link to the CambFurs group! This link is only valid for {minutes_valid} minutes\n\n{invite_link.invite_link}")
 COMMANDS.append(cmd_approve)
 
 
@@ -255,38 +296,21 @@ async def join_request(update:Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await context.bot.decline_chat_join_request(chat_id, user_id)
         return
 
-    global APPROVED_JOIN_REQUESTS
-    if username not in APPROVED_JOIN_REQUESTS:
+    global APPROVED_USERS_IN_WAITING_ROOM
+    if username not in APPROVED_USERS_IN_WAITING_ROOM:
         await alert(context.bot, f"⛔ Declined join request from {username}: they were not approved")
         await context.bot.decline_chat_join_request(chat_id, user_id)
         return
 
-    if APPROVED_JOIN_REQUESTS[username] != update.chat_join_request.invite_link:
-        await alert(context.bot, f"⛔ Declined join request from {username}: they used a link not intended for them")
-        await context.bot.decline_chat_join_request(chat_id, user_id)
-        return
-
-    del APPROVED_JOIN_REQUESTS[username]
+    APPROVED_USERS_IN_WAITING_ROOM.discard(username)
     await context.bot.approve_chat_join_request(CONFIG.main_group_id, user_id)
     await context.bot.revoke_chat_invite_link(CONFIG.main_group_id, update.chat_join_request.invite_link)
-    await context.bot.ban_chat_member(CONFIG.waiting_room_group_id, user_id)
     await main_group_welcome(context.bot, update.chat_join_request.from_user)
+    # To kick a user from the waiting room we "unban" them. This will kick a
+    # member if they're in the chat by default. Yes that's a weird API decision.
+    # see: https://core.telegram.org/bots/api#unbanchatmember
+    await context.bot.unban_chat_member(CONFIG.waiting_room_group_id, user_id)
 
-# Main #########################################################################
-
-def main() -> None:
-    app = ApplicationBuilder()\
-        .token(CONFIG.bot_token)\
-        .post_init(initialize)\
-        .post_stop(finalize)\
-        .build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("say",   cmd_say))
-    app.add_handler(CommandHandler("approve", cmd_approve))
-    app.add_handler(CommandHandler("meet_dates", cmd_meet_dates))
-    app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(ChatJoinRequestHandler(join_request))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
