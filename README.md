@@ -19,13 +19,13 @@ CatBot expects to be in three groups:
 Catbot expects [Privacy Mode](https://core.telegram.org/bots/features#privacy-mode) to be turned off.
 That way it can read messages you give it in the admin group and waiting room group without being admin.
 
-### `config.toml`
-Catbot requires a single configuration file `config.toml` containing the following fields:
-```toml
-bot_token = "<YOUR TELEGRAM BOT TOKEN>"
-main_group_id = -1234567890
-admin_group_id = -1234567890
-waiting_room_group_id = -1234567890
+### `secrets.py`
+Catbot requires a single configuration file `secrets.py` containing the following fields:
+```python
+BOT_TOKEN = "<YOUR TELEGRAM BOT TOKEN>"
+MAIN_GROUP_ID = -1234567890
+ADMIN_GROUP_ID = -1234567890
+WAITING_ROOM_GROUP_ID = -1234567890
 ```
 For security reasons, this file must never be checked in.
 

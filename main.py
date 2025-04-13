@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 from dataclasses import dataclass
-import tomllib
 import datetime
 
 import arrow # arrow is used by ICS instead of datetime
@@ -15,9 +14,13 @@ from telegram.constants import ChatMemberStatus, ParseMode
 from telegram import Update, Bot
 from telegram.ext import Application, ApplicationBuilder, ContextTypes, CommandHandler, ChatJoinRequestHandler, ChatMemberHandler
 
+from secrets import BOT_TOKEN, ADMIN_GROUP_ID, MAIN_GROUP_ID, WAITING_ROOM_GROUP_ID
+ICAL_URL = 'https://calendar.cambfurs.co.uk'
+LOCAL_TZ = 'Europe/London'
+
 def main() -> None:
     app = ApplicationBuilder()\
-        .token(CONFIG.bot_token)\
+        .token(BOT_TOKEN)\
         .post_init(initialize)\
         .post_stop(finalize)\
         .build()
@@ -27,32 +30,12 @@ def main() -> None:
     app.add_handler(CommandHandler("meet_dates", cmd_meet_dates))
     app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(ChatJoinRequestHandler(join_request))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-# Configuration ################################################################
-
-@dataclass(slots=True)
-class Config:
-    bot_token: str
-    main_group_id: int
-    admin_group_id: int
-    waiting_room_group_id: int
-    def __init__(self,filepath):
-        with open(filepath,"rb") as file:
-            cfg = tomllib.load(file)
-        self.bot_token    = cfg['bot_token']
-        self.main_group_id = cfg['main_group_id']
-        self.admin_group_id = cfg['admin_group_id']
-        self.waiting_room_group_id = cfg['waiting_room_group_id']
-
-CONFIG = Config("config.toml")
-ICAL_URL = 'https://calendar.cambfurs.co.uk'
-LOCAL_TZ = 'Europe/London'
+    app.run_polling(allowed_updates=Update.ALL_TYPES) # Update.ALL_TYPES required to get ChatMemberHandler events
 
 # Utilities ####################################################################
 
 async def get_admin_set(bot:Bot) -> set[int]:
-    chat_members = await bot.get_chat_administrators(CONFIG.main_group_id)
+    chat_members = await bot.get_chat_administrators(MAIN_GROUP_ID)
     return {chat_member.user.id for chat_member in chat_members}
 
 
@@ -69,25 +52,25 @@ async def respond_error(update: Update, context: ContextTypes.DEFAULT_TYPE, mess
 
 
 async def alert(bot:Bot, text: str) -> None:
-    await bot.send_message(chat_id=CONFIG.admin_group_id, text=text)
+    await bot.send_message(chat_id=ADMIN_GROUP_ID, text=text)
 
 
-async def announce(bot:Bot, lines: list[str], chat_id=CONFIG.main_group_id, **kwargs) -> None:
+async def announce(bot:Bot, lines: list[str], chat_id=MAIN_GROUP_ID, **kwargs) -> None:
     await bot.send_message(chat_id=chat_id, 
                            parse_mode=ParseMode.HTML,
                            text="\n".join(lines),
                            **kwargs)
 
 
-def sanitize(text: str) -> str:
+def sanitize(text: str|None) -> str:
     # See: https://core.telegram.org/bots/api#html-style
-    # NOTE: Order matters! "&" must be escaped first!
     if text is None:
         return ""
     else:
-        return text.replace("&", "&amp")\
-                   .replace("<", "&lt")\
-                   .replace(">", "&gt")
+        # NOTE: Order matters! "&" must be escaped first!
+        return text.replace("&", "&amp;")\
+                   .replace("<", "&lt;")\
+                   .replace(">", "&gt;")
 
 
 def ordinal(n:int) -> str:
@@ -120,12 +103,12 @@ async def waiting_room_welcome(bot, user) -> None:
         f"Hi {sanitize(user.first_name)}! An admin will be with you shortly to get you in the main chat.",
          "",
         "In the mean time, please read <a href='https://rules.cambfurs.co.uk'>the rules</a> and let us know and whether you agree."
-    ], chat_id=CONFIG.waiting_room_group_id)
+    ], chat_id=WAITING_ROOM_GROUP_ID)
 
 
 async def main_group_welcome(bot, user) -> None:
     await announce(bot, [
-        f"Everyone welcome {sanitize(user.username)} to the chat!",
+        f"Everyone welcome <a href='tg://user?id={user.id}'>{sanitize(user.first_name)}</a> to the chat!",
     ])
 
 
@@ -144,7 +127,7 @@ async def meet_next_week(bot, event) -> None:
     await announce(bot, [ f"Reminder! the {month_name} meet is next week!" ])
 
 
-# This Callback gets called every hour at the top of the hour
+# This callback gets called every hour at the top of the hour
 async def hourly_callback(bot, now, next_events):
     for event in next_events:
         if now.floor('hour')==event.begin.floor('hour'):
@@ -186,7 +169,7 @@ async def finalize(app: Application) -> None:
 # catbot was live.
 SEEN_MEMBERS_IN_WAITING_ROOM = set()
 async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.chat_member.chat.id != CONFIG.waiting_room_group_id:
+    if update.chat_member.chat.id != WAITING_ROOM_GROUP_ID:
         return
     old = update.chat_member.old_chat_member
     new = update.chat_member.new_chat_member
@@ -217,8 +200,8 @@ COMMANDS.append(cmd_start)
 async def cmd_meet_dates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/meet_dates: list upcoming meet dates"""
     if not(update.message.chat.type=="private" or \
-           update.message.chat.id==CONFIG.main_group_id or \
-           update.message.chat.id==CONFIG.admin_group_id):
+           update.message.chat.id==MAIN_GROUP_ID or \
+           update.message.chat.id==ADMIN_GROUP_ID):
         return
     upcoming_events = await get_upcoming_meet_events()
     ret = ["⭐ <b><u>Upcoming meet dates</u></b> ⭐"]
@@ -234,7 +217,7 @@ COMMANDS.append(cmd_meet_dates)
 async def cmd_say(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/say: puts replied message into the main chat"""
 
-    if not update.message.chat.type=="private" or update.message.chat.id==CONFIG.admin_group_id:
+    if not update.message.chat.type=="private" or update.message.chat.id==ADMIN_GROUP_ID:
         return
 
     admin_set = await get_admin_set(context.bot)
@@ -246,7 +229,7 @@ async def cmd_say(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     text = update.message.reply_to_message.text
-    message = await context.bot.send_message(chat_id=CONFIG.main_group_id, text=text)
+    message = await context.bot.send_message(chat_id=MAIN_GROUP_ID, text=text)
     await respond_success(update,context,f"Sent! id: {message.id}")
 COMMANDS.append(cmd_say)
 
@@ -261,7 +244,7 @@ APPROVED_USERS_IN_WAITING_ROOM = set()
 async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/approve @username: create invite link for user"""
 
-    if not update.message.chat.id==CONFIG.waiting_room_group_id:
+    if not update.message.chat.id==WAITING_ROOM_GROUP_ID:
         return
 
     if not update.message.from_user.username=="GroupAnonymousBot":
@@ -275,7 +258,7 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     minutes_valid = 5
     invite_link = await context.bot.create_chat_invite_link(
-        CONFIG.main_group_id,
+        MAIN_GROUP_ID,
         creates_join_request=True,
         expire_date=datetime.datetime.now(datetime.UTC)+datetime.timedelta(minutes=minutes_valid))
 
@@ -291,7 +274,7 @@ async def join_request(update:Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.chat_join_request.chat.id
     username = f"@{update.chat_join_request.from_user.username}"
 
-    if chat_id!=CONFIG.main_group_id:
+    if chat_id!=MAIN_GROUP_ID:
         await alert(context.bot, f"⛔ Declined join request from {username}: requested to join chat other than main group")
         await context.bot.decline_chat_join_request(chat_id, user_id)
         return
@@ -303,13 +286,13 @@ async def join_request(update:Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     APPROVED_USERS_IN_WAITING_ROOM.discard(username)
-    await context.bot.approve_chat_join_request(CONFIG.main_group_id, user_id)
-    await context.bot.revoke_chat_invite_link(CONFIG.main_group_id, update.chat_join_request.invite_link)
+    await context.bot.approve_chat_join_request(MAIN_GROUP_ID, user_id)
+    await context.bot.revoke_chat_invite_link(MAIN_GROUP_ID, update.chat_join_request.invite_link)
     await main_group_welcome(context.bot, update.chat_join_request.from_user)
     # To kick a user from the waiting room we "unban" them. This will kick a
     # member if they're in the chat by default. Yes that's a weird API decision.
     # see: https://core.telegram.org/bots/api#unbanchatmember
-    await context.bot.unban_chat_member(CONFIG.waiting_room_group_id, user_id)
+    await context.bot.unban_chat_member(WAITING_ROOM_GROUP_ID, user_id)
 
 
 if __name__ == '__main__':

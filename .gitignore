@@ -1,7 +1,7 @@
 # ignore everything
 /*
 # except for:
-!/*.py
+!/main.py
 !/*.md
 !/.gitignore
 !/pyproject.toml
